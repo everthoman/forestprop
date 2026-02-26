@@ -68,6 +68,12 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+try:
+    from rdkit import RDLogger
+    RDLogger.DisableLog("rdApp.warning")
+except ImportError:
+    pass
 logger = logging.getLogger(__name__)
 
 
@@ -742,12 +748,20 @@ def run_pipeline(args):
     # ── Load data ──────────────────────────────────────────────────────────────
     logger.info(f"Loading data from {args.input}")
     df = pd.read_csv(args.input)
-    for col in [args.smiles_col, args.id_col, args.activity_col]:
+    # Normalise column names: remap case-insensitive matches to the actual header
+    col_map = {c.lower(): c for c in df.columns}
+    for attr in ("smiles_col", "id_col", "activity_col"):
+        val = getattr(args, attr)
+        if val is not None and val not in df.columns and val.lower() in col_map:
+            setattr(args, attr, col_map[val.lower()])
+    for col in [args.smiles_col, args.activity_col]:
         if col not in df.columns:
             raise ValueError(f"Column '{col}' not found. Available: {list(df.columns)}")
+    if args.id_col is not None and args.id_col not in df.columns:
+        raise ValueError(f"Column '{args.id_col}' not found. Available: {list(df.columns)}")
 
     smiles = df[args.smiles_col].tolist()
-    ids = df[args.id_col].tolist()
+    ids = df[args.id_col].tolist() if args.id_col is not None and args.id_col in df.columns else list(range(len(df)))
     y_raw = df[args.activity_col].values
 
     # ── Parse SMILES ───────────────────────────────────────────────────────────
@@ -894,6 +908,8 @@ def run_pipeline(args):
             "prediction_set_size":   y_sets[:, :, 0].sum(axis=1),
         })
         for i, cls in enumerate(classes):
+            results_df[f"in_set_{cls}"] = y_sets[:, i, 0].astype(int)
+        for i, cls in enumerate(classes):
             results_df[f"prob_class{cls}"] = proba[:, i]
 
     # ── Full dataset predictions, table, and scatter plot ─────────────────────
@@ -935,6 +951,8 @@ def run_pipeline(args):
             "prediction_set_size": y_sets_all[:, :, 0].sum(axis=1),
             "split":               split_labels,
         })
+        for i, cls in enumerate(fitted_base.classes_):
+            pred_all_df[f"in_set_{cls}"] = y_sets_all[:, i, 0].astype(int)
         for i, cls in enumerate(fitted_base.classes_):
             pred_all_df[f"prob_class{cls}"] = proba_all[:, i]
 
@@ -1006,7 +1024,7 @@ def run_predict(args):
     logger.info(f"Loading data from {args.input}")
     df = pd.read_csv(args.input)
     smiles = df[args.smiles_col].tolist()
-    ids    = df[args.id_col].tolist()
+    ids    = df[args.id_col].tolist() if args.id_col is not None and args.id_col in df.columns else list(range(len(df)))
 
     mols, valid_idx = smiles_to_mol(smiles)
     fp_config = {
@@ -1043,6 +1061,8 @@ def run_predict(args):
             "prediction_set_size": y_sets[:, :, 0].sum(axis=1),
         })
         for i, cls in enumerate(fitted_base.classes_):
+            pred_df[f"in_set_{cls}"] = y_sets[:, i, 0].astype(int)
+        for i, cls in enumerate(fitted_base.classes_):
             pred_df[f"prob_class{cls}"] = proba[:, i]
 
     pred_df.to_csv(output_dir / "predictions.csv", index=False)
@@ -1075,7 +1095,7 @@ def parse_args():
     train_p.add_argument("--input", "-i", required=True,
                          help="Input CSV with SMILES, IDs, and activity values")
     train_p.add_argument("--smiles_col",   default="SMILES")
-    train_p.add_argument("--id_col",       default="ID")
+    train_p.add_argument("--id_col",       default=None)
     train_p.add_argument("--activity_col", default="pIC50")
     train_p.add_argument("--task", choices=["regression", "classification"],
                          default="regression")
@@ -1117,7 +1137,7 @@ def parse_args():
     pred_p.add_argument("--input",      "-i", required=True)
     pred_p.add_argument("--load_model",       required=True)
     pred_p.add_argument("--smiles_col",  default="SMILES")
-    pred_p.add_argument("--id_col",      default="ID")
+    pred_p.add_argument("--id_col",      default=None)
     _add_feature_args(pred_p)
     pred_p.add_argument("--output", "-o", default="forestprop_predictions")
 
