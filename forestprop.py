@@ -480,7 +480,8 @@ def get_feature_importance(fitted_base, feature_names, top_n=50):
 
 
 def plot_regression_results(y_true, y_pred, y_pis, split_labels, metrics,
-                            output_dir, confidence_level, activity_col="activity"):
+                            output_dir, confidence_level, activity_col="activity",
+                            train_metrics=None):
     """Save a scatter plot of predicted vs experimental with conformal intervals."""
     try:
         import matplotlib
@@ -525,10 +526,13 @@ def plot_regression_results(y_true, y_pred, y_pis, split_labels, metrics,
     ax.set_xlim(lo, hi)
     ax.set_ylim(lo, hi)
 
-    # Metric annotation (test set)
+    # Metric annotation (test set, with train R² for comparison)
     cov_key = next((k for k in metrics if "Coverage" in k), None)
-    lines = [f"RMSE  = {metrics['RMSE']:.3f}",
-             f"R²    = {metrics['R2']:.3f}"]
+    lines = []
+    if train_metrics is not None:
+        lines.append(f"R² train = {train_metrics['Train_R2']:.3f}")
+    lines += [f"R² test  = {metrics['R2']:.3f}",
+              f"RMSE     = {metrics['RMSE']:.3f}"]
     if cov_key:
         lines.append(f"{cov_key} = {metrics[cov_key]:.3f}")
     ax.text(
@@ -884,6 +888,33 @@ def run_pipeline(args):
     # ── Evaluate on held-out test set ──────────────────────────────────────────
     # This is the outer evaluation — valid regardless of HPO or not.
     logger.info("Evaluating on held-out test set...")
+
+    # Train metrics (bare RF, no conformal — in-sample coverage is not meaningful)
+    X_trainval_imp = imputer.transform(X_trainval)
+    y_pred_train = fitted_base.predict(X_trainval_imp)
+
+    if args.task == "regression":
+        from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+        train_metrics = {
+            "Train_R2":   float(r2_score(y_trainval, y_pred_train)),
+            "Train_RMSE": float(np.sqrt(mean_squared_error(y_trainval, y_pred_train))),
+            "Train_MAE":  float(mean_absolute_error(y_trainval, y_pred_train)),
+        }
+    else:
+        from sklearn.metrics import (
+            accuracy_score, roc_auc_score, matthews_corrcoef, balanced_accuracy_score,
+        )
+        try:
+            train_auc = float(roc_auc_score(y_trainval, fitted_base.predict_proba(X_trainval_imp)[:, 1]))
+        except Exception:
+            train_auc = float("nan")
+        train_metrics = {
+            "Train_Accuracy":          float(accuracy_score(y_trainval, y_pred_train)),
+            "Train_Balanced_Accuracy": float(balanced_accuracy_score(y_trainval, y_pred_train)),
+            "Train_MCC":               float(matthews_corrcoef(y_trainval, y_pred_train)),
+            "Train_ROC_AUC":           train_auc,
+        }
+
     if args.task == "regression":
         y_pred, y_pis = predict_conformal(mapie, imputer, X_test, args.task, args.alpha)
         metrics = evaluate_regression(y_test, y_pred, y_pis, args.alpha)
@@ -939,6 +970,7 @@ def run_pipeline(args):
             output_dir=output_dir,
             confidence_level=args.confidence_level,
             activity_col=args.activity_col,
+            train_metrics=train_metrics,
         )
     else:
         y_pred_all, y_sets_all = mapie.predict_set(X_all_imp)
@@ -961,9 +993,14 @@ def run_pipeline(args):
 
     # ── Save outputs ───────────────────────────────────────────────────────────
     results_df.to_csv(output_dir / "predictions_test.csv", index=False)
-    pd.DataFrame([metrics]).to_csv(output_dir / "metrics.csv", index=False)
+    all_metrics = {**train_metrics, **metrics}
+    pd.DataFrame([all_metrics]).to_csv(output_dir / "metrics.csv", index=False)
 
     logger.info("\n=== Evaluation Metrics ===")
+    logger.info("  -- Train (in-sample, no conformal) --")
+    for k, v in train_metrics.items():
+        logger.info(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
+    logger.info("  -- Test --")
     for k, v in metrics.items():
         logger.info(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
 
